@@ -412,12 +412,10 @@ int main(void)
                     SSD1306_SetCursor(3, 0); SSD1306_WriteString(lb);
                     snprintf(lb, sizeof(lb), "Prs:%ldhPa", (long)(s_bmp.pressure / 100));
                     SSD1306_SetCursor(4, 0); SSD1306_WriteString(lb);
-                    snprintf(lb, sizeof(lb), "PM:%04dug", s_gp.density);
-                    SSD1306_SetCursor(5, 0); SSD1306_WriteString(lb);
                     snprintf(lb, sizeof(lb), "Lux:%04dlx", s_bh.lux);
-                    SSD1306_SetCursor(6, 0); SSD1306_WriteString(lb);
+                    SSD1306_SetCursor(5, 0); SSD1306_WriteString(lb);
                     snprintf(lb, sizeof(lb), "Snd:%04u  %3u%%", s_mic.level, s_mic.level_pct);
-                    SSD1306_SetCursor(7, 0); SSD1306_WriteString(lb);
+                    SSD1306_SetCursor(6, 0); SSD1306_WriteString(lb);
                     break;
                 }
                 case 1:

@@ -58,7 +58,8 @@ extern "C" {
  *  关键命令（均为 16-bit big-endian）
  * ==========================================================================*/
 #define SGP30_CMD_IAQ_MEASURE   0x2008  /* 测量 IAQ (TVOC + eCO2) */
-#define SGP30_CMD_GET_SERIAL    0x3682  /* 获取序列号（用于验证传感器存在）*/
+#define SGP30_CMD_IAQ_INIT      0x2003  /* 启动 IAQ 基线算法 */
+#define SGP30_CMD_GET_SERIAL    0x3682  /* 获取序列号 */
 #define SGP30_CMD_GET_BASELINE  0x2015  /* 获取基线值 */
 #define SGP30_CMD_SET_BASELINE  0x201E  /* 设置基线值 */
 #define SGP30_CMD_GET_FEATURE   0x202F  /* 获取特性集版本 */
@@ -66,6 +67,7 @@ extern "C" {
 /* ==========================================================================
  *  时序参数
  * ==========================================================================*/
+#define SGP30_IAQ_INIT_TIME_MS      10      /* IAQ Init 等待时间 (ms) */
 #define SGP30_IAQ_MEASURE_TIME_MS   12      /* IAQ 测量等待时间 (ms) */
 #define SGP30_INIT_WARMUP_MS        15000   /* 首次预热时间 (15s) */
 #define SGP30_READ_INTERVAL_MS      1000    /* 建议读取间隔 (1Hz) */

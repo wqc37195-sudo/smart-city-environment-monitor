@@ -182,7 +182,14 @@ uint8_t SGP30_Init(void)
     }
 
     /* 序列号读取成功即表示传感器存在 */
-    /* 首次 IAQ 测量 — 启动内部算法 */
+    /* 启动 IAQ 基线算法（必须！否则 eCO2 始终为 400） */
+    if (SGP30_SendCmd(SGP30_CMD_IAQ_INIT))
+    {
+        return 1;
+    }
+    HAL_Delay(SGP30_IAQ_INIT_TIME_MS);
+
+    /* 首次 IAQ 测量 — 丢弃预热读数 */
     if (SGP30_SendCmd(SGP30_CMD_IAQ_MEASURE))
     {
         return 1;
