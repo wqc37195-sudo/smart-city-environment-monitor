@@ -1,0 +1,68 @@
+# ===== Build Outputs =====
+*.o
+*.o-*
+*.o~*
+*.obj
+*.elf
+*.axf
+*.map
+*.hex
+*.bin
+*.out
+*.lst
+*.lnp
+*.dep
+*.d
+*.crf
+*.o.d
+*.htm
+*.build_log.htm
+build_log.txt
+*.TMP
+
+# ===== MDK-ARM (Keil) =====
+MDK-ARM/*.uvguix.*
+MDK-ARM/*.uvoptx
+MDK-ARM/*/RTE/
+MDK-ARM/*/DebugConfig/
+MDK-ARM/*/*.uvguix.*
+MDK-ARM/*/Listings/
+MDK-ARM/*/Objects/
+MDK-ARM/*/*.scvd
+MDK-ARM/*/*.uvoptx
+MDK-ARM/*/JLinkLog.txt
+MDK-ARM/*/*.Administrator
+MDK-ARM/startup_stm32wlxx.s
+
+# ===== EWARM (IAR) =====
+EWARM/*/Debug/
+EWARM/*/Release/
+EWARM/*/settings/
+EWARM/*/Obj/
+EWARM/*/Exe/
+
+# ===== STM32CubeIDE =====
+STM32CubeIDE/*/Debug/
+STM32CubeIDE/*/Release/
+STM32CubeIDE/*/.settings/
+
+# ===== STM32CubeMX =====
+*.mxproject
+
+# ===== Miscellaneous IDE =====
+*.vscode/
+*.vs/
+*.swp
+*.swo
+*~
+.DS_Store
+Thumbs.db
+Desktop.ini
+
+# ===== Internal Tooling =====
+.reasonix/
+reasonix.toml
+.extSettings
+
+# ===== Template Documents =====
+模板.docx
