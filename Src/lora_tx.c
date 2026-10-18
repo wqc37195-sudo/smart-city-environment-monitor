@@ -84,9 +84,9 @@ uint8_t LoRa_TX_Send(const uint8_t *data, uint16_t len)
         return 0;
     }
 
-    if (len > sizeof(s_tx_buf))
+    if (len > 255u)
     {
-        len = sizeof(s_tx_buf);
+        return 0; /* Never silently truncate a protocol frame. */
     }
 
     /* 如果上次发送尚未完成，轮询等待 */

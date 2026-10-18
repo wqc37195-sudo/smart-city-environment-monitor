@@ -25,12 +25,10 @@
   *    CR:       4/5
   *    CRC:      ON
   *
-  *  [Data Format (12 bytes)]
-  *    [0..1]   Temperature:  int16,  big-endian, value = C * 10
-  *    [2..3]   Humidity:     uint16, big-endian, value = % * 10
-  *    [4..7]   Pressure:     uint32, big-endian, unit Pa
-  *    [8..9]   Light:        uint16, big-endian, unit lux
-  *    [10..11] eCO2:         uint16, big-endian, unit ppm
+  *  [Data Format]
+  *    v1: 28 bytes, version + per-field validity + sequence + sample timing.
+  *    Legacy 12-byte frames are accepted with UNKNOWN measurement validity.
+  *    See README.md and sensor_protocol.h for the exact wire format.
   *
   *  [Required Libraries]
   *    - LoRa by Sandeep Mistry
@@ -42,6 +40,7 @@
 #include <LoRa.h>
 #include <WiFi.h>
 #include <WebServer.h>
+#include "sensor_protocol.h"
 
 // ===== WiFi AP settings =====
 const char* WIFI_SSID     = "LoRa-Sensor";
@@ -76,20 +75,28 @@ static uint16_t    g_press_dec    = 0;
 static uint16_t    g_lux          = 0;
 static uint16_t    g_eco2         = 0;
 static uint32_t    g_last_update  = 0;
+static SensorFrame g_frame = {};
+static bool        g_expired = true;
+static bool        g_has_sample   = false;
+static uint32_t    g_invalid_count = 0;
+static const uint32_t STALE_AFTER_MS = 10000;
 
 /* ================================================================
  *  Parse received LoRa packet and update global sensor values
  * ================================================================ */
-void parsePacket(uint8_t *buf, uint8_t len)
+bool parsePacket(uint8_t *buf, uint8_t len)
 {
-  if (len < 12) return;
+  SensorFrame f;
+  if (!sensor_decode(buf, len, &f)) return false;
 
-  int16_t  temp_raw = (int16_t)((buf[0] << 8) | buf[1]);
-  uint16_t hum_raw  = (uint16_t)((buf[2] << 8) | buf[3]);
-  uint32_t press    = (uint32_t)((buf[4] << 24) | (buf[5] << 16) | (buf[6] << 8) | buf[7]);
-  uint16_t lux      = (uint16_t)((buf[8] << 8) | buf[9]);
-  uint16_t eco2     = (uint16_t)((buf[10] << 8) | buf[11]);
+  int16_t temp_raw = f.temperature_deci_c;
+  uint16_t hum_raw = f.humidity_deci_pct;
+  uint32_t press = f.pressure_pa;
+  uint16_t lux = f.light_lux;
+  uint16_t eco2 = f.eco2_ppm;
 
+  g_frame = f;
+  g_expired = false;
   g_temp      = temp_raw / 10.0f;
   g_hum       = hum_raw / 10.0f;
   g_press_hpa = press / 100;
@@ -97,6 +104,28 @@ void parsePacket(uint8_t *buf, uint8_t len)
   g_lux       = lux;
   g_eco2      = eco2;
   g_last_update = millis();
+  g_has_sample = true;
+  return true;
+}
+
+/* Age includes acquisition time before transmission, but not radio airtime.
+ * Unsigned subtraction handles millis() wrap. Expiry latches until a new frame. */
+uint32_t sampleAge(uint32_t now)
+{
+  uint32_t elapsed = (uint32_t)(now - g_last_update);
+  if (UINT32_MAX - elapsed < g_frame.source_age_ms) return UINT32_MAX;
+  return elapsed + g_frame.source_age_ms;
+}
+
+bool sampleStale(uint32_t now)
+{
+  if (!g_has_sample || sampleAge(now) > STALE_AFTER_MS) g_expired = true;
+  return g_expired;
+}
+
+uint8_t usableMask(uint32_t now)
+{
+  return (!sampleStale(now) && g_frame.version == SENSOR_VERSION) ? g_frame.valid_mask : 0;
 }
 
 /* ================================================================
@@ -104,7 +133,9 @@ void parsePacket(uint8_t *buf, uint8_t len)
  * ================================================================ */
 String buildPage()
 {
-  uint32_t secs = (millis() - g_last_update) / 1000;
+  uint32_t now = millis();
+  uint32_t secs = sampleAge(now) / 1000;
+  uint8_t valid = usableMask(now);
 
   String html = R"raw(<!DOCTYPE html>
 <html lang="zh">
@@ -140,25 +171,30 @@ String buildPage()
 )raw";
 
   html += "<div class='card tmp'><div class='lbl'>Temperature</div>";
-  html += "<div class='val'>" + String(g_temp, 1) + "<span class='unit'> &deg;C</span></div></div>";
+  html += "<div class='val'>" + ((valid & SENSOR_VALID_TEMP) ? String(g_temp, 1) : String("--")) + "<span class='unit'> &deg;C</span></div></div>";
 
   html += "<div class='card hum'><div class='lbl'>Humidity</div>";
-  html += "<div class='val'>" + String(g_hum, 1) + "<span class='unit'> %</span></div></div>";
+  html += "<div class='val'>" + ((valid & SENSOR_VALID_HUM) ? String(g_hum, 1) : String("--")) + "<span class='unit'> %</span></div></div>";
 
   html += "<div class='card prs'><div class='lbl'>Pressure</div>";
-  html += "<div class='val'>" + String(g_press_hpa) + "." + String(g_press_dec / 10) + String(g_press_dec % 10) + "<span class='unit'> hPa</span></div></div>";
+  html += "<div class='val'>" + ((valid & SENSOR_VALID_PRESS) ? String(g_frame.pressure_pa / 100.0f, 2) : String("--")) + "<span class='unit'> hPa</span></div></div>";
 
   html += "<div class='card lux'><div class='lbl'>Light</div>";
-  html += "<div class='val'>" + String(g_lux) + "<span class='unit'> lx</span></div></div>";
+  html += "<div class='val'>" + ((valid & SENSOR_VALID_LIGHT) ? String(g_lux) : String("--")) + "<span class='unit'> lx</span></div></div>";
 
   html += "<div class='card co2 full'><div class='lbl'>eCO2</div>";
-  html += "<div class='val'>" + String(g_eco2) + "<span class='unit'> ppm</span></div></div>";
+  html += "<div class='val'>" + ((valid & SENSOR_VALID_ECO2) ? String(g_eco2) : String("--")) + "<span class='unit'> ppm</span></div></div>";
 
   html += "<div class='card sig full'><div class='lbl'>Signal &amp; Packets</div>";
   html += "<div class='val'>RSSI " + String(g_rssi) + " dBm &nbsp; SNR " + String(g_snr, 1) + " dB</div>";
-  html += "<div class='lbl'>Packets: " + String(g_packet_count) + " &nbsp; Last: " + String(secs) + "s ago</div></div>";
+  html += "<div class='lbl'>Packets: " + String(g_packet_count) + " &nbsp; Last: " + (g_has_sample ? String(secs) : String("--")) + "s ago</div></div>";
 
   html += "</div>";
+  html += "<p>State: " + String(!g_has_sample ? "WAITING / no sample" :
+            (sampleStale(now) ? "STALE" :
+             (g_frame.version == 0 ? "UNKNOWN / legacy frame" :
+              (valid == SENSOR_VALID_ALL ? "VALID" : "PARTIAL / sensor unavailable")))) + "</p>";
+  html += "<p>eCO2 is an air-quality estimate. Not a gas-leak alarm.</p>";
   html += "<div class='info'>Auto-refresh every 2s &bull; LoRa 433MHz SF7</div>";
   html += "<script>setTimeout(function(){location.reload();},2000);</script>";
   html += "</body></html>";
@@ -179,6 +215,48 @@ void handleNotFound()
   server.send(404, "text/plain", "404 Not Found");
 }
 
+void handleStatus()
+{
+  uint32_t now = millis();
+  bool stale = sampleStale(now);
+  uint8_t valid = usableMask(now);
+  bool versioned = g_has_sample && g_frame.version == SENSOR_VERSION;
+  String body = "{\"schema\":\"sensor-status-v1\",\"has_sample\":";
+  body += g_has_sample ? "true" : "false";
+  body += ",\"protocol_version\":" + (g_has_sample ? String(g_frame.version) : String("null"));
+  body += ",\"stale\":";
+  body += stale ? "true" : "false";
+  body += ",\"age_ms\":" + (g_has_sample ? String(sampleAge(now)) : String("null"));
+  body += ",\"received_age_ms\":" + (g_has_sample ? String((uint32_t)(now - g_last_update)) : String("null"));
+  body += ",\"sequence\":" + (versioned ? String(g_frame.sequence) : String("null"));
+  body += ",\"sample_uptime_ms\":" + (versioned ? String(g_frame.sample_uptime_ms) : String("null"));
+  body += ",\"source_age_ms\":" + (versioned ? String(g_frame.source_age_ms) : String("null"));
+  body += ",\"source_valid_mask\":" + (versioned ? String(g_frame.valid_mask) : String("null"));
+  body += ",\"valid\":{\"temperature_c\":";
+  body += (valid & SENSOR_VALID_TEMP) ? "true" : "false";
+  body += ",\"humidity_pct\":";
+  body += (valid & SENSOR_VALID_HUM) ? "true" : "false";
+  body += ",\"pressure_pa\":";
+  body += (valid & SENSOR_VALID_PRESS) ? "true" : "false";
+  body += ",\"light_lux\":";
+  body += (valid & SENSOR_VALID_LIGHT) ? "true" : "false";
+  body += ",\"eco2_ppm\":";
+  body += (valid & SENSOR_VALID_ECO2) ? "true" : "false";
+  body += "}";
+  body += ",\"valid_packets\":" + String(g_packet_count);
+  body += ",\"invalid_packets\":" + String(g_invalid_count);
+  body += ",\"temperature_c\":" + ((valid & SENSOR_VALID_TEMP) ? String(g_temp, 1) : String("null"));
+  body += ",\"humidity_pct\":" + ((valid & SENSOR_VALID_HUM) ? String(g_hum, 1) : String("null"));
+  body += ",\"pressure_pa\":" + ((valid & SENSOR_VALID_PRESS) ? String(g_frame.pressure_pa) : String("null"));
+  body += ",\"light_lux\":" + ((valid & SENSOR_VALID_LIGHT) ? String(g_lux) : String("null"));
+  body += ",\"eco2_ppm\":" + ((valid & SENSOR_VALID_ECO2) ? String(g_eco2) : String("null"));
+  body += ",\"rssi_dbm\":" + (g_has_sample ? String(g_rssi) : String("null"));
+  body += ",\"snr_db\":" + (g_has_sample ? String(g_snr, 1) : String("null"));
+  body += ",\"authenticated\":false,\"safety_control_eligible\":false}";
+  server.sendHeader("Cache-Control", "no-store");
+  server.send(200, "application/json", body);
+}
+
 /* ================================================================
  *  Initialization
  * ================================================================ */
@@ -197,6 +275,7 @@ void setup()
 
   // --- Web Server ---
   server.on("/", handleRoot);
+  server.on("/api/status", HTTP_GET, handleStatus);
   server.onNotFound(handleNotFound);
   server.begin();
   Serial.println("HTTP server started on port 80");
@@ -229,12 +308,19 @@ void setup()
 void loop()
 {
   // --- Handle web clients ---
+  sampleStale(millis());
   server.handleClient();
 
   // --- Handle LoRa packets ---
   int packetSize = LoRa.parsePacket();
   if (packetSize > 0)
   {
+    if (packetSize != SENSOR_LEGACY_SIZE && packetSize != SENSOR_FRAME_SIZE)
+    {
+      while (LoRa.available()) LoRa.read();
+      g_invalid_count++;
+      return;
+    }
     uint8_t buf[64];
     uint8_t idx = 0;
 
@@ -243,11 +329,14 @@ void loop()
       buf[idx++] = (uint8_t)LoRa.read();
     }
 
+    if (!parsePacket(buf, idx))
+    {
+      g_invalid_count++;
+      return;
+    }
     g_rssi = LoRa.packetRssi();
     g_snr  = LoRa.packetSnr();
     g_packet_count++;
-
-    parsePacket(buf, idx);
 
     // Serial output
     Serial.printf("[#%u] RSSI=%d SNR=%.1f | T=%.1fC H=%.1f%% P=%u.%02uhPa L=%ulx CO2=%uppm\r\n",

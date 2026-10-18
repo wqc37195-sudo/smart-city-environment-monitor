@@ -24,7 +24,7 @@
   *    PA13/PA14 — SWD: 烧录调试接口
   *
   *  【数据流】
-  *    主循环每 2 秒执行一次：
+  *    主循环：采集、显示和发送后延时 800ms，周期随处理耗时变化：
   *      1. DHT11_Read()  → 温湿度（单总线时序）
   *      2. BMP280_Read() → 气压 + 温度（I2C, 补偿公式）
   *      3. BH1750_Read() → 光照度（I2C）
@@ -57,6 +57,7 @@
 #include "gp2y1010.h"
 #include "data_log.h"
 #include "chart.h"      /* GP2Y1010 粉尘传感器驱动 */
+#include "sensor_protocol.h"
 #include "lora_tx.h"       /* LoRa 射频发送驱动 */
 #include "mic.h"           /* MAX9814/MAX4466 麦克风驱动 */
 #include "sgp30.h"          /* GY-SGP30 TVOC/eCO2 传感器驱动 */
@@ -97,6 +98,9 @@ uint8_t  s_page = 0;        /* OLED 当前页面 (0~3) */
 uint8_t  s_btn_last = 1;    /* 按键上一次状态（1=松开） */
 uint8_t  s_btn_press = 0;   /* 按键按下标志 */
 uint8_t  s_lora_ok_last = 0; /* 上次 LoRa 发送结果：1=成功 */
+static uint32_t s_sample_sequence = 0;
+static uint8_t s_sgp_ready = 0;
+static uint32_t s_sgp_init_tick = 0;
 uint16_t s_lora_count = 0;   /* LoRa 成功发送计数 */
 /* USER CODE END PV */
 
@@ -248,6 +252,8 @@ int main(void)
   SOFT_I2C_Init();
   {
     uint8_t sgp_ret = SGP30_Init();
+    s_sgp_ready = (sgp_ret == 0);
+    s_sgp_init_tick = HAL_GetTick();
     if (sgp_ret == 0)
       printf("SGP30 init OK\r\n");
     else
@@ -278,7 +284,7 @@ int main(void)
   /* Infinite loop */
   /* USER CODE BEGIN WHILE */
   /* ==================================================================
-   *  主循环：每 2 秒采集一次数据
+   *  主循环：每轮采集后延时 800ms，另有传感器、显示和发送耗时
    *  每次循环执行：
    *    0. 读取 GP2Y1010 → 粉尘浓度（10次脉冲采样平均）
    *    1. 读取 DHT11 → 温湿度
@@ -301,12 +307,21 @@ int main(void)
     }
 
     /* ===== Read sensors ===== */
+    uint32_t sample_tick = HAL_GetTick();
     GP2Y1010_Read(&s_gp);
     uint8_t dht_ok = (DHT11_Read(&s_dht) == 0);
     uint8_t bmp_ok = (BMP280_ReadData(&s_bmp) == BMP280_OK);
     uint8_t bh_ok  = (BH1750_ReadLight(&s_bh) == 0);
     MIC_Read(&s_mic);   /* 32 次突发采样，不影响其他传感器 */
-    SGP30_Read(&s_sgp); /* TVOC + eCO2（I2C, 12ms 等待）*/
+    uint8_t sgp_ok = (SGP30_Read(&s_sgp) == 0);
+    if (!sgp_ok) s_sgp_ready = 0; /* Reinitialize after bus failure or sensor restart. */
+    /* Successful transport alone does not make startup readings usable. */
+    sgp_ok = sgp_ok && s_sgp_ready &&
+             (uint32_t)(HAL_GetTick() - s_sgp_init_tick) >= SGP30_INIT_WARMUP_MS;
+    if (!s_sgp_ready) {
+        s_sgp_ready = (SGP30_Init() == 0);
+        s_sgp_init_tick = HAL_GetTick();
+    }
 
     /* ===== 串口输出：所有数据整合在一个框里 ===== */
     printf("\r\n+------ Sensor Data ------+\r\n");
@@ -351,26 +366,23 @@ int main(void)
 
     /* ===== LoRa 发送传感器数据 ===== */
     {
-        /* 打包格式：Tmp(2B)+Hum(2B)+Prs(4B)+Lux(2B)+eCO2(2B)=12B */
-        uint8_t lora_pkt[12];
-        int16_t  tmp = (int16_t)(s_dht.temperature_int * 10 + s_dht.temperature_dec);
-        uint16_t hum = (uint16_t)(s_dht.humidity_int * 10 + s_dht.humidity_dec);
-        uint32_t prs = (uint32_t)s_bmp.pressure;
-        uint16_t lux = s_bh.lux;
-        uint16_t eco2 = (uint16_t)s_sgp.eco2_ppm;
-
-        lora_pkt[0] = (uint8_t)(tmp >> 8);
-        lora_pkt[1] = (uint8_t)(tmp);
-        lora_pkt[2] = (uint8_t)(hum >> 8);
-        lora_pkt[3] = (uint8_t)(hum);
-        lora_pkt[4] = (uint8_t)(prs >> 24);
-        lora_pkt[5] = (uint8_t)(prs >> 16);
-        lora_pkt[6] = (uint8_t)(prs >> 8);
-        lora_pkt[7] = (uint8_t)(prs);
-        lora_pkt[8] = (uint8_t)(lux >> 8);
-        lora_pkt[9] = (uint8_t)(lux);
-        lora_pkt[10] = (uint8_t)(eco2 >> 8);
-        lora_pkt[11] = (uint8_t)(eco2);
+        uint8_t lora_pkt[SENSOR_FRAME_SIZE];
+        SensorFrame frame = {0};
+        frame.version = SENSOR_VERSION;
+        frame.sequence = s_sample_sequence++; /* Counts attempts, including TX failures. */
+        frame.sample_uptime_ms = sample_tick;
+        frame.source_age_ms = (uint32_t)(HAL_GetTick() - sample_tick);
+        frame.temperature_deci_c = (int16_t)(s_dht.temperature_int * 10 + s_dht.temperature_dec);
+        frame.humidity_deci_pct = (uint16_t)(s_dht.humidity_int * 10 + s_dht.humidity_dec);
+        frame.pressure_pa = (uint32_t)s_bmp.pressure;
+        frame.light_lux = s_bh.lux;
+        frame.eco2_ppm = s_sgp.eco2_ppm;
+        if (dht_ok && frame.humidity_deci_pct <= 1000u)
+            frame.valid_mask |= SENSOR_VALID_TEMP | SENSOR_VALID_HUM;
+        if (bmp_ok) frame.valid_mask |= SENSOR_VALID_PRESS;
+        if (bh_ok) frame.valid_mask |= SENSOR_VALID_LIGHT;
+        if (sgp_ok) frame.valid_mask |= SENSOR_VALID_ECO2;
+        sensor_encode(lora_pkt, &frame);
 
         if (LoRa_TX_Send(lora_pkt, sizeof(lora_pkt)))
         {
